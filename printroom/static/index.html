@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>文印室打印队列</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<header class="topbar">
+  <div>
+    <h1>文印室 · 双面打印队列</h1>
+    <p class="sub">按页录入 · 逐面出纸 · 卡纸换机续印 · 按原页序装订</p>
+  </div>
+  <div class="topbar-right">
+    <span id="server-time" class="muted"></span>
+    <button id="refresh" class="ghost" type="button">刷新</button>
+  </div>
+</header>
+
+<main>
+  <div id="banner" class="banner" hidden></div>
+
+  <section class="grid two">
+    <div class="panel">
+      <h2>① 录入文档</h2>
+      <form id="doc-form" class="row">
+        <input id="doc-title" placeholder="文档标题，例如：会议纪要" maxlength="200" required>
+        <button type="submit">新建</button>
+      </form>
+      <div id="doc-editor" class="editor muted">还没有正在编辑的文档。</div>
+      <ul id="documents" class="list"></ul>
+    </div>
+
+    <div class="panel">
+      <h2>② 打印机</h2>
+      <div id="printers" class="printers"></div>
+      <p class="hint">
+        每张纸先出正面、再出背面；奇数页文档末张背面留白，直接出纸。
+        卡纸时先报告卡纸，等原机<strong>确认停稳</strong>后再换机派续单。
+      </p>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>③ 作业与续单</h2>
+    <div id="jobs" class="jobs"></div>
+  </section>
+
+  <section class="panel">
+    <h2>④ 出纸记录（用于核对装订页序）</h2>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>时间</th><th>作业</th><th>打印机</th><th>张号</th>
+            <th>正面页</th><th>背面页</th><th>正面</th><th>背面</th><th>状态</th><th>备注</th>
+          </tr>
+        </thead>
+        <tbody id="records"></tbody>
+      </table>
+    </div>
+    <p class="hint">完整出纸 = 该张纸要求的各个面都已输出；作废的半张不计入装订。</p>
+  </section>
+</main>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

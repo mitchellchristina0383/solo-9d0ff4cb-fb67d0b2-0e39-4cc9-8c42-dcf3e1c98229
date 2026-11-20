@@ -1,0 +1,16 @@
+services:
+  printroom:
+    build: .
+    image: printroom:local
+    container_name: printroom
+    ports:
+      - "8000:8000"
+    volumes:
+      # SQLite 数据放在命名卷里，容器重建后出纸与续印进度不丢。
+      - printroom-data:/app/data
+    environment:
+      PRINTROOM_DB: /app/data/printroom.db
+    restart: unless-stopped
+
+volumes:
+  printroom-data:
