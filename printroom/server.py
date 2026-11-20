@@ -12,7 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable, Optional
 from urllib.parse import urlparse
 
-from . import db, service
+from . import db, health, service
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 MAX_BODY = 1024 * 1024
@@ -25,6 +25,7 @@ def _json_bytes(payload: Any) -> bytes:
 class Handler(BaseHTTPRequestHandler):
     server_version = "PrintRoom/1.0"
     db_path: str = db.DEFAULT_DB
+    health: health.HealthProbe
 
     # ------------------------------------------------------------------ 基础
     def _send(self, status: int, body: bytes, content_type: str) -> None:
@@ -72,7 +73,9 @@ class Handler(BaseHTTPRequestHandler):
                 self._serve_static("index.html")
                 return
             if path == "/healthz":
-                self._json({"ok": True})
+                # 以作业库能否实际提交一次探测写入为准；只有确认可写才给 200。
+                result = self.health.check()
+                self._json(result, 200 if result["ok"] else 503)
                 return
             if path == "/api/state":
                 self._json(service.get_state(self.db_path))
@@ -207,6 +210,7 @@ def create_server(
         pass
 
     BoundHandler.db_path = db_path
+    BoundHandler.health = health.HealthProbe(db_path)
     httpd = ThreadingHTTPServer((host, port), BoundHandler)
     httpd.daemon_threads = True
     return httpd

@@ -12,6 +12,7 @@ STATIC = os.path.join(ROOT, "printroom", "static")
 EXPECTED_IDS = {
     "banner", "doc-form", "doc-title", "doc-editor", "documents",
     "printers", "jobs", "records", "refresh", "server-time",
+    "storage-status",
 }
 
 

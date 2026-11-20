@@ -38,7 +38,7 @@ python3 -m printroom          # 默认 0.0.0.0:8000，数据库 data/printroom.d
 ## 测试与自检
 
 ```bash
-python3 -m unittest tests.test_printroom -v   # 24 个端到端用例
+python3 -m unittest tests.test_printroom -v   # 31 个端到端用例（含 /healthz 持锁/只读/缺失/恢复）
 python3 scripts/check_ui.py                   # 静态页面与脚本引用一致性
 python3 scripts/demo.py                       # 跑通“半张卡纸”和“停稳前出纸”两条验收路径
 ```
@@ -49,6 +49,7 @@ python3 scripts/demo.py                       # 跑通“半张卡纸”和“�
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
+| GET | `/healthz` | 存储健康探测：仅当作业库能实际提交一次探测写入时返回 200，否则 503 |
 | GET | `/api/state` | 文档、作业、打印机、出纸记录全量快照 |
 | GET | `/api/jobs/{id}` | 单个作业（含 `collation` 装订视图） |
 | GET | `/api/documents/{id}` | 文档及页面 |
@@ -70,3 +71,29 @@ python3 scripts/demo.py                       # 跑通“半张卡纸”和“�
 - `sheet_attempts(job_id, sheet_no) WHERE status='complete'` 唯一，保证同一张纸不会被计为两次完整出纸。
 - `print_segments.continued_from` 唯一，保证一个停稳段最多派生一份续单；并发重复请求返回同一份。
 - 进度全部落在 SQLite（`data/` 命名卷），服务重启后继续从数据库状态续印。
+
+## 存储健康探测（/healthz）
+
+`/healthz` 不再只看进程存活，而是**每次都对当前作业库实际提交一次探测写入**（专用表
+`health_probe` 单行心跳，不触碰文档、作业及出纸记录；用 `mode=rw` 打开，库文件缺失时
+不会新建空库）。Docker 的 `HEALTHCHECK` 和网页顶栏的“存储状态”徽标都以此为唯一依据，
+网页徽标每 3 秒独立轮询，作业列表读失败时探测结论照样显示。
+
+判定规则：
+
+| 情形 | HTTP | `status` | 说明 |
+| --- | --- | --- | --- |
+| 探测写入提交并回读成功 | 200 | `ready` | 就绪 |
+| 出纸事务占锁（1 秒内报暂忙） | 沿用上次已确认判定（无结论则 503） | `busy` | 暂忙，不改写结论 |
+| 卷只读 / 库文件缺失 / 无法打开 | 503 | `error` | 故障 |
+
+故障恢复后**无需重启**：下一次探测写入真正提交成功即重新就绪；恢复后若恰好有事务占锁，
+在重新确认前保持未就绪。
+
+故障演练（容器内）：
+
+```bash
+docker compose exec printroom chmod -R a-w /app/data   # 模拟卷只读 → 徽标变“存储故障”，容器 unhealthy
+docker compose exec printroom chmod -R u+w /app/data   # 恢复 → 下一次探测提交成功即回“存储正常”
+docker inspect -f '{{.State.Health.Status}}' printroom  # 查看容器健康结论
+```

@@ -117,6 +117,37 @@ async function refresh() {
     state.focusPage = false;
   } catch (err) {
     showBanner("无法连接服务：" + err.message);
+    // 作业列表读失败时，存储探测结论仍要立即呈现。
+    refreshHealth();
+  }
+}
+
+// ---------------------------------------------------------------- 存储状态
+// 与 /api/state 完全解耦：作业列表读不出来时，探测结论照样刷新。
+
+const STORAGE_LABELS = {
+  ready: "存储正常 · 可写",
+  busy: "存储暂忙",
+  error: "存储故障",
+  unknown: "存储状态未知",
+};
+
+function renderStorage(h) {
+  const node = document.getElementById("storage-status");
+  const status = h && STORAGE_LABELS[h.status] ? h.status : "unknown";
+  node.className = `storage ${status}`;
+  node.textContent = STORAGE_LABELS[status];
+  node.title = (h && h.detail) || "";
+}
+
+async function refreshHealth() {
+  try {
+    const resp = await fetch("/healthz", { headers: { "Accept": "application/json" }, cache: "no-store" });
+    let payload = null;
+    try { payload = await resp.json(); } catch (_) { /* ignore */ }
+    renderStorage(payload || { status: "error", detail: `探测接口返回 ${resp.status}` });
+  } catch (err) {
+    renderStorage({ status: "unknown", detail: "无法获取探测结论：" + err.message });
   }
 }
 
@@ -384,4 +415,6 @@ document.getElementById("doc-form").addEventListener("submit", async (event) => 
 document.getElementById("refresh").addEventListener("click", () => refresh());
 
 refresh();
+refreshHealth();
 setInterval(() => { if (!state.busy) refresh(); }, 5000);
+setInterval(refreshHealth, 3000);

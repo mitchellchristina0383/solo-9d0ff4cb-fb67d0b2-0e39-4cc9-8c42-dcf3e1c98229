@@ -96,6 +96,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_in_progress_attempt
 CREATE INDEX IF NOT EXISTS ix_segments_job ON print_segments(job_id);
 CREATE INDEX IF NOT EXISTS ix_attempts_job ON sheet_attempts(job_id);
 CREATE INDEX IF NOT EXISTS ix_attempts_segment ON sheet_attempts(segment_id);
+
+-- /healthz 探测专用表：每次探测只更新这一行，不触碰上面的业务表。
+CREATE TABLE IF NOT EXISTS health_probe (
+    id         INTEGER PRIMARY KEY CHECK (id = 1),
+    touched_at TEXT NOT NULL
+);
 """
 
 

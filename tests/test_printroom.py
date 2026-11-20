@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.request
@@ -535,6 +537,166 @@ class ServiceDirectTests(unittest.TestCase):
         job_id = self._job(2)
         with self.assertRaises(service.ServiceError):
             service.report_jam(self.db, job_id)
+
+
+class HealthTests(BaseCase):
+    """/healthz 以作业库能否实际提交一次探测写入为准。"""
+
+    # ---- 辅助 ----
+    def health(self):
+        return self.srv.get("/healthz")
+
+    def hold_write_lock(self) -> sqlite3.Connection:
+        """模拟一个还没提交的出纸事务：占住写锁不放手。"""
+        conn = sqlite3.connect(self.db_path, isolation_level=None)
+        conn.execute("BEGIN IMMEDIATE")
+        return conn
+
+    def table_counts(self) -> dict:
+        conn = sqlite3.connect(self.db_path)
+        try:
+            tables = ("documents", "document_pages", "jobs", "print_segments", "sheet_attempts")
+            return {t: conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in tables}
+        finally:
+            conn.close()
+
+    def chmod_data(self, dir_mode: int, file_mode: int) -> None:
+        """模拟卷只读/恢复：整目录改权限。"""
+        data_dir = os.path.dirname(self.db_path)
+        os.chmod(data_dir, 0o755)  # 先保证能进入目录改文件
+        for name in os.listdir(data_dir):
+            os.chmod(os.path.join(data_dir, name), file_mode)
+        os.chmod(data_dir, dir_mode)
+
+    def test_ready_when_writable_and_shape(self):
+        code, payload = self.health()
+        self.assertEqual(code, 200, payload)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["status"], "ready")
+        self.assertTrue(payload["writable"])
+        self.assertEqual(payload["code"], "ok")
+        self.assertTrue(payload["last_ready_at"])
+
+    def test_probe_does_not_touch_domain_tables(self):
+        job_id = self.finalize(self.make_doc("探测无副作用", 3))["id"]
+        self.start(job_id, "P1")
+        self.print_side(job_id, "front", 1)
+        before = self.table_counts()
+        for _ in range(3):
+            code, payload = self.health()
+            self.assertEqual(code, 200, payload)
+        self.assertEqual(self.table_counts(), before, "探测不得改动文档、作业及出纸记录")
+        conn = sqlite3.connect(self.db_path)
+        try:
+            rows = conn.execute("SELECT COUNT(*) FROM health_probe").fetchone()[0]
+        finally:
+            conn.close()
+        self.assertEqual(rows, 1, "探测表只保留一行心跳")
+
+    def test_missing_db_fails_and_recovers_without_restart(self):
+        code, payload = self.health()
+        self.assertEqual(code, 200, payload)
+
+        data_dir = os.path.dirname(self.db_path)
+        moved = []
+        for name in os.listdir(data_dir):
+            os.rename(os.path.join(data_dir, name), os.path.join(data_dir, name + ".bak"))
+            moved.append(name)
+        try:
+            code, payload = self.health()
+            self.assertEqual(code, 503, payload)
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["status"], "error")
+            self.assertEqual(payload["code"], "db_missing")
+            self.assertFalse(os.path.exists(self.db_path), "探测不得新建空库")
+        finally:
+            for name in moved:
+                os.rename(os.path.join(data_dir, name + ".bak"), os.path.join(data_dir, name))
+
+        # 不重启服务，库文件回来后探测写入提交成功即恢复就绪
+        code, payload = self.health()
+        self.assertEqual(code, 200, payload)
+        self.assertEqual(payload["status"], "ready")
+
+    def test_readonly_volume_fails_and_recovers_without_restart(self):
+        code, payload = self.health()
+        self.assertEqual(code, 200, payload)
+
+        self.chmod_data(0o555, 0o444)  # 卷只读
+        try:
+            code, payload = self.health()
+            self.assertEqual(code, 503, payload)
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["status"], "error")
+            self.assertIn(payload["code"], ("readonly", "db_unopenable", "io_error"), payload)
+        finally:
+            self.chmod_data(0o755, 0o644)  # 卷恢复可写
+
+        code, payload = self.health()
+        self.assertEqual(code, 200, payload)
+        self.assertEqual(payload["status"], "ready")
+
+    def test_busy_reuses_last_ready_verdict_within_a_second(self):
+        code, payload = self.health()
+        self.assertEqual(code, 200, payload)
+
+        holder = self.hold_write_lock()
+        try:
+            start = time.monotonic()
+            code, payload = self.health()
+            elapsed = time.monotonic() - start
+            self.assertLess(elapsed, 1.5, "占锁时探测必须在 1 秒左右给出结论")
+            self.assertEqual(payload["status"], "busy", payload)
+            self.assertEqual(code, 200, "上次已确认就绪，占锁时沿用就绪判定")
+            self.assertTrue(payload["ok"])
+        finally:
+            holder.execute("ROLLBACK")
+            holder.close()
+
+        code, payload = self.health()
+        self.assertEqual(code, 200, payload)
+        self.assertEqual(payload["status"], "ready")
+
+    def test_busy_without_prior_verdict_stays_not_ready(self):
+        holder = self.hold_write_lock()  # 第一次探测前就先占锁
+        try:
+            code, payload = self.health()
+            self.assertEqual(payload["status"], "busy", payload)
+            self.assertEqual(code, 503, "尚无已确认结论时保持未就绪")
+            self.assertFalse(payload["ok"])
+        finally:
+            holder.execute("ROLLBACK")
+            holder.close()
+
+        code, payload = self.health()
+        self.assertEqual(code, 200, payload)
+
+    def test_after_failure_recovery_requires_a_real_committed_probe(self):
+        code, payload = self.health()
+        self.assertEqual(code, 200, payload)
+
+        self.chmod_data(0o555, 0o444)  # 卷只读 → 故障
+        try:
+            code, payload = self.health()
+            self.assertEqual(code, 503, payload)
+        finally:
+            self.chmod_data(0o755, 0o644)  # 卷恢复可写
+
+        # 卷已恢复，但此时恰好有出纸事务占锁：故障后还没有新的已确认结论，
+        # 必须保持未就绪，直到真正提交一次探测写入。
+        holder = self.hold_write_lock()
+        try:
+            code, payload = self.health()
+            self.assertEqual(payload["status"], "busy", payload)
+            self.assertEqual(code, 503, "故障后未重新确认前，占锁沿用故障判定")
+            self.assertFalse(payload["ok"])
+        finally:
+            holder.execute("ROLLBACK")
+            holder.close()
+
+        code, payload = self.health()
+        self.assertEqual(code, 200, "锁释放后实际提交探测写入，重新就绪")
+        self.assertEqual(payload["status"], "ready")
 
 
 if __name__ == "__main__":
